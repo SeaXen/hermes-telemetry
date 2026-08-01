@@ -1425,6 +1425,19 @@ class _BackgroundPayloadCache:
             self._cond.notify_all()
 
     def _run(self):
+        # Stagger initial refresh across caches so the 5 cache loops (each
+        # DEFAULT_REFRESH_SECONDS=300) don't pile onto the same SQLite
+        # connection at startup and again on every tick. The offset is a
+        # deterministic function of CACHE_NAME so it survives restarts.
+        try:
+            offset_seed = sum(ord(c) for c in self.CACHE_NAME)
+            jitter = (offset_seed * 37) % 30
+        except Exception:
+            jitter = 0
+        if jitter:
+            with self._cond:
+                if self._stop.wait(timeout=jitter):
+                    return
         try:
             self._refresh_all()
         except Exception:
@@ -1554,6 +1567,13 @@ class _BackgroundPayloadCache:
         started = time.monotonic()
         try:
             for kwargs in self.default_refresh_kwargs():
+                # Skip all-time/zero-window keys from the background cadence —
+                # those scan the entire history (10y+ of tool_calls on a busy
+                # host) and dominate the 5-min spike. The on-demand path in
+                # ``refresh()``/``get_rows()`` still computes them when the UI
+                # actually asks for the all-time window.
+                if self._is_all_time_kwargs(kwargs):
+                    continue
                 try:
                     self.refresh(**kwargs)
                 except Exception:
@@ -1569,6 +1589,31 @@ class _BackgroundPayloadCache:
             }
         finally:
             self._refreshing = False
+
+    @staticmethod
+    def _is_all_time_kwargs(kwargs) -> bool:
+        """Return True for kwargs that ask for the full history window.
+
+        Background warm skips these — the all-time rows are still computed
+        when ``refresh()``/``get_rows()`` is called from a request path.
+        """
+        if not kwargs:
+            return False
+        # Common convention: window_hours=0 means "no lower bound, all rows".
+        if "window_hours" in kwargs:
+            try:
+                if int(kwargs["window_hours"]) == 0:
+                    return True
+            except (TypeError, ValueError):
+                pass
+        # Some charts use limit_days >= 3650 as the all-time marker.
+        if "limit_days" in kwargs:
+            try:
+                if int(kwargs["limit_days"]) >= 3650:
+                    return True
+            except (TypeError, ValueError):
+                pass
+        return False
 
     def cache_key(self, **kwargs):
         raise NotImplementedError

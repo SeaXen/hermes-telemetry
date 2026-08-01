@@ -1432,3 +1432,74 @@ def test_model_efficiency_sql_uses_window_filter(tmp_path, serve_module, monkeyp
         assert params in ((), [], None) or len(params) == 0, params
     finally:
         serve_module.ModelEfficiencyCache.reset_for_tests()
+
+# --- Tests added in fix-3 for 5-min spike prevention ---
+
+
+def test_refresh_all_skips_all_time_kwargs(serve_module, tmp_path, monkeypatch):
+    """Background warm must skip all-time kwargs (window_hours=0, limit_days>=3650).
+
+    Those scan the entire history and were the dominant 5-min spike source.
+    On-demand refresh() from a request path is unaffected.
+    """
+    import sqlite3
+    from dashboard import serve as serve_module_inner
+
+    db_path = tmp_path / "telemetry.db"
+    # The cache's _write_cache needs the endpoint_payload_cache table.
+    # Build a minimal schema so the test is self-contained.
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE endpoint_payload_cache (
+            cache_name TEXT,
+            cache_key TEXT,
+            payload_json TEXT NOT NULL,
+            rows_count INTEGER NOT NULL DEFAULT 0,
+            built_at TEXT NOT NULL,
+            PRIMARY KEY (cache_name, cache_key)
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    calls = []
+    class DemoCache(serve_module_inner._BackgroundPayloadCache):
+        CACHE_NAME = "demo-skip"
+        DEFAULT_REFRESH_SECONDS = 60
+        DEFAULT_KEYS = (
+            {"window_hours": 24},
+            {"window_hours": 168},
+            {"window_hours": 0},                              # all-time -> skip
+            {"window_hours": 24, "limit_days": 3650},         # all-time -> skip
+        )
+
+        def cache_key(self, **kw):
+            return f"{kw.get('window_hours')}-{kw.get('limit_days','')}"
+
+        def compute_rows(self, **kw):
+            calls.append((kw.get("window_hours"), kw.get("limit_days")))
+            return []
+
+    cache = DemoCache(db_path)
+    cache._refresh_all()
+    assert sorted(calls) == [(24, None), (168, None)], calls
+    # Manual on-demand call still works for all-time.
+    cache.refresh(window_hours=0)
+    cache.refresh(window_hours=24, limit_days=3650)
+    assert (0, None) in calls
+    assert (24, 3650) in calls
+
+
+def test_run_stagger_offset_is_deterministic_per_cache(serve_module, tmp_path, monkeypatch):
+    """The per-cache stagger offset is stable so restarts don't thrash timing."""
+    from dashboard import serve as serve_module_inner
+
+    offsets = {}
+    for name in ("providers", "provider-health", "daily-token-chart", "daily-model-chart", "model-efficiency"):
+        seed = sum(ord(c) for c in name)
+        offsets[name] = (seed * 37) % 30
+    # All within [0, 30) and not all the same.
+    assert all(0 <= v < 30 for v in offsets.values())
+    assert len(set(offsets.values())) > 1, offsets
