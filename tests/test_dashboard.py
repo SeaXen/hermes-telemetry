@@ -1433,6 +1433,7 @@ def test_model_efficiency_sql_uses_window_filter(tmp_path, serve_module, monkeyp
     finally:
         serve_module.ModelEfficiencyCache.reset_for_tests()
 
+
 # --- Tests added in fix-3 for 5-min spike prevention ---
 
 
@@ -1443,6 +1444,7 @@ def test_refresh_all_skips_all_time_kwargs(serve_module, tmp_path, monkeypatch):
     On-demand refresh() from a request path is unaffected.
     """
     import sqlite3
+
     from dashboard import serve as serve_module_inner
 
     db_path = tmp_path / "telemetry.db"
@@ -1465,18 +1467,19 @@ def test_refresh_all_skips_all_time_kwargs(serve_module, tmp_path, monkeypatch):
     conn.close()
 
     calls = []
+
     class DemoCache(serve_module_inner._BackgroundPayloadCache):
         CACHE_NAME = "demo-skip"
         DEFAULT_REFRESH_SECONDS = 60
         DEFAULT_KEYS = (
             {"window_hours": 24},
             {"window_hours": 168},
-            {"window_hours": 0},                              # all-time -> skip
-            {"window_hours": 24, "limit_days": 3650},         # all-time -> skip
+            {"window_hours": 0},  # all-time -> skip
+            {"window_hours": 24, "limit_days": 3650},  # all-time -> skip
         )
 
         def cache_key(self, **kw):
-            return f"{kw.get('window_hours')}-{kw.get('limit_days','')}"
+            return f"{kw.get('window_hours')}-{kw.get('limit_days', '')}"
 
         def compute_rows(self, **kw):
             calls.append((kw.get("window_hours"), kw.get("limit_days")))
@@ -1494,10 +1497,15 @@ def test_refresh_all_skips_all_time_kwargs(serve_module, tmp_path, monkeypatch):
 
 def test_run_stagger_offset_is_deterministic_per_cache(serve_module, tmp_path, monkeypatch):
     """The per-cache stagger offset is stable so restarts don't thrash timing."""
-    from dashboard import serve as serve_module_inner
 
     offsets = {}
-    for name in ("providers", "provider-health", "daily-token-chart", "daily-model-chart", "model-efficiency"):
+    for name in (
+        "providers",
+        "provider-health",
+        "daily-token-chart",
+        "daily-model-chart",
+        "model-efficiency",
+    ):
         seed = sum(ord(c) for c in name)
         offsets[name] = (seed * 37) % 30
     # All within [0, 30) and not all the same.
