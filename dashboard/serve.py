@@ -1437,7 +1437,7 @@ class _BackgroundPayloadCache:
         if not cache_name:
             return 0
         try:
-            return (sum(ord(c) for c in cache_name) * 37) % 30
+            return (sum(ord(c) for c in cache_name) * 37 + 1) % 30
         except Exception:
             return 0
 
@@ -1450,14 +1450,11 @@ class _BackgroundPayloadCache:
         # jitter duration after a restart.
         jitter = self._startup_jitter_seconds(self.CACHE_NAME)
         if jitter:
-            with self._cond:
-                # ``self._cond.wait`` releases the underlying lock while
-                # waiting and returns True if a notify_all woke us (i.e. stop()
-                # was called). ``self._stop.wait`` (Event.wait) does NOT
-                # release the Condition's lock — that's the regression this
-                # block replaces.
-                if self._cond.wait(timeout=jitter):
-                    return
+            if not self._stop.is_set():
+                with self._cond:
+                    self._cond.wait(timeout=jitter)
+            if self._stop.is_set():
+                return
         try:
             self._refresh_all()
         except Exception:
